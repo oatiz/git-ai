@@ -1038,6 +1038,41 @@ impl AgentCheckpointPreset for CodexPreset {
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
+        // Prefer model from stdin (available in PreToolUse/PostToolUse payloads),
+        // fall back to rollout transcript parsing below.
+        let stdin_model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let hook_event_name = hook_data
+            .get("hook_event_name")
+            .and_then(|v| v.as_str());
+
+        // For PreToolUse, return a human checkpoint immediately — no transcript needed.
+        if hook_event_name == Some("PreToolUse") {
+            let will_edit_filepaths =
+                CodexPreset::extract_filepaths_from_tool_input(&hook_data);
+
+            let agent_id = AgentId {
+                tool: "codex".to_string(),
+                id: session_id,
+                model: stdin_model.unwrap_or_else(|| "unknown".to_string()),
+            };
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: Some(cwd.to_string()),
+                edited_filepaths: None,
+                will_edit_filepaths,
+                dirty_files: None,
+            });
+        }
+
+        // PostToolUse or legacy (no hook_event_name): parse transcript and build AI checkpoint.
         let transcript_path = hook_data
             .get("transcript_path")
             .and_then(|v| v.as_str())
@@ -1062,7 +1097,7 @@ impl AgentCheckpointPreset for CodexPreset {
                 },
             );
 
-        let (transcript, model) = if let Some(path) = transcript_path.as_deref() {
+        let (transcript, rollout_model) = if let Some(path) = transcript_path.as_deref() {
             match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(path) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
@@ -1074,24 +1109,37 @@ impl AgentCheckpointPreset for CodexPreset {
                             "operation": "transcript_and_model_from_codex_rollout_jsonl"
                         })),
                     );
-                    (AiTranscript::new(), Some("unknown".to_string()))
+                    (AiTranscript::new(), None)
                 }
             }
         } else {
             eprintln!(
                 "[Warning] No Codex rollout path found for session {session_id}; continuing with empty transcript"
             );
-            (AiTranscript::new(), Some("unknown".to_string()))
+            (AiTranscript::new(), None)
         };
+
+        let model = stdin_model
+            .or(rollout_model)
+            .unwrap_or_else(|| "unknown".to_string());
 
         let agent_id = AgentId {
             tool: "codex".to_string(),
             id: session_id,
-            model: model.unwrap_or_else(|| "unknown".to_string()),
+            model,
         };
 
         let agent_metadata =
             transcript_path.map(|path| HashMap::from([("transcript_path".to_string(), path)]));
+
+        // For PostToolUse, extract edited file paths: prefer tool_input.files,
+        // fall back to parsing tool_response output.
+        let edited_filepaths = if hook_event_name == Some("PostToolUse") {
+            CodexPreset::extract_filepaths_from_tool_input(&hook_data)
+                .or_else(|| CodexPreset::extract_filepaths_from_tool_response(&hook_data))
+        } else {
+            None
+        };
 
         Ok(AgentRunResult {
             agent_id,
@@ -1099,7 +1147,7 @@ impl AgentCheckpointPreset for CodexPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: None,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -1120,6 +1168,42 @@ impl CodexPreset {
                     .and_then(|v| v.as_str())
             })
             .map(|s| s.to_string())
+    }
+
+    /// Extract file paths from tool_input.files array.
+    fn extract_filepaths_from_tool_input(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let files = hook_data.get("tool_input")?.get("files")?.as_array()?;
+        let paths: Vec<String> = files.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    /// Extract edited file paths from tool_response for PostToolUse events.
+    /// Codex apply_patch output format: "Success. Updated the following files:\nA path\nM path\n"
+    fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let tool_response = hook_data.get("tool_response")?;
+
+        // tool_response can be a JSON string or an object
+        let response_obj = if let Some(s) = tool_response.as_str() {
+            serde_json::from_str::<serde_json::Value>(s).ok()?
+        } else {
+            tool_response.clone()
+        };
+
+        let output = response_obj.get("output").and_then(|v| v.as_str())?;
+
+        let mut paths = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            // Format: "A poems/old-poem.txt" or "M src/main.rs" (status letter + space + path)
+            if trimmed.len() > 2
+                && trimmed.as_bytes()[1] == b' '
+                && matches!(trimmed.as_bytes()[0], b'A' | b'M' | b'D' | b'R' | b'U')
+            {
+                paths.push(trimmed[2..].to_string());
+            }
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
     }
 
     pub fn codex_home_dir() -> PathBuf {
@@ -3646,5 +3730,183 @@ impl AgentCheckpointPreset for AiTabPreset {
             will_edit_filepaths: None,
             dirty_files,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codex_pretooluse_returns_human_checkpoint() {
+        let input = serde_json::json!({
+            "session_id": "019d4dfb-940e-71d1-bc4c-951d0e38b8dd",
+            "turn_id": "019d4dfb-b6d7-7411-ad58-9f26bd84a77e",
+            "transcript_path": "/tmp/nonexistent-rollout.jsonl",
+            "cwd": "/tmp/test-repo",
+            "hook_event_name": "PreToolUse",
+            "model": "gpt-5.4-mini",
+            "permission_mode": "default",
+            "tool_name": "apply_patch",
+            "tool_input": {"files": ["poems/test.txt"]},
+            "tool_use_id": "call_abc123"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        assert!(
+            matches!(run.checkpoint_kind, CheckpointKind::Human),
+            "PreToolUse should produce a Human checkpoint"
+        );
+        assert_eq!(run.agent_id.tool, "codex");
+        assert_eq!(run.agent_id.model, "gpt-5.4-mini");
+        assert_eq!(
+            run.agent_id.id,
+            "019d4dfb-940e-71d1-bc4c-951d0e38b8dd"
+        );
+        assert_eq!(
+            run.repo_working_dir.as_deref(),
+            Some("/tmp/test-repo")
+        );
+        assert!(run.transcript.is_none(), "PreToolUse should skip transcript");
+        assert!(run.agent_metadata.is_none());
+        assert!(run.edited_filepaths.is_none());
+        let will_edit = run.will_edit_filepaths.expect("should have will_edit_filepaths");
+        assert_eq!(will_edit, vec!["poems/test.txt"]);
+    }
+
+    #[test]
+    fn test_codex_posttooluse_returns_ai_agent_checkpoint() {
+        let input = serde_json::json!({
+            "session_id": "019d4dfb-940e-71d1-bc4c-951d0e38b8dd",
+            "turn_id": "019d4dfb-b6d7-7411-ad58-9f26bd84a77e",
+            "transcript_path": "/tmp/nonexistent-rollout.jsonl",
+            "cwd": "/tmp/test-repo",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.4-mini",
+            "permission_mode": "default",
+            "tool_name": "apply_patch",
+            "tool_input": {"files": ["poems/少女之诗.txt", "poems/old-man-poem.txt"]},
+            "tool_response": "{\"output\":\"Success. Updated the following files:\\nA poems/少女之诗.txt\\nM poems/old-man-poem.txt\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.0}}",
+            "tool_use_id": "call_abc123"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        assert!(
+            matches!(run.checkpoint_kind, CheckpointKind::AiAgent),
+            "PostToolUse should produce an AiAgent checkpoint"
+        );
+        assert_eq!(run.agent_id.model, "gpt-5.4-mini");
+        assert!(run.transcript.is_some());
+
+        // Prefers tool_input.files over tool_response parsing
+        let edited = run.edited_filepaths.expect("should extract edited files");
+        assert_eq!(edited, vec!["poems/少女之诗.txt", "poems/old-man-poem.txt"]);
+    }
+
+    #[test]
+    fn test_codex_posttooluse_falls_back_to_tool_response() {
+        // When tool_input has no files array, fall back to tool_response parsing
+        let input = serde_json::json!({
+            "session_id": "sess-fallback",
+            "cwd": "/tmp/test-repo",
+            "hook_event_name": "PostToolUse",
+            "model": "gpt-5.4-mini",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": "apply_patch"},
+            "tool_response": "{\"output\":\"Success. Updated the following files:\\nA poems/old-poem.txt\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.0}}",
+            "tool_use_id": "call_fallback"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        let edited = run.edited_filepaths.expect("should fall back to tool_response");
+        assert_eq!(edited, vec!["poems/old-poem.txt"]);
+    }
+
+    #[test]
+    fn test_codex_posttooluse_with_object_tool_response() {
+        let input = serde_json::json!({
+            "session_id": "sess-001",
+            "cwd": "/tmp/test-repo",
+            "hook_event_name": "PostToolUse",
+            "model": "o3",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": "apply_patch"},
+            "tool_response": {
+                "output": "Success. Updated the following files:\nM src/main.rs\nA src/lib.rs\n",
+                "metadata": {"exit_code": 0}
+            },
+            "tool_use_id": "call_xyz"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        let edited = run.edited_filepaths.expect("should extract edited files");
+        assert_eq!(edited, vec!["src/main.rs", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn test_codex_legacy_no_hook_event_name() {
+        // Old-format Codex payloads without hook_event_name should still work.
+        let input = serde_json::json!({
+            "session_id": "legacy-session",
+            "cwd": "/tmp/test-repo"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        assert!(
+            matches!(run.checkpoint_kind, CheckpointKind::AiAgent),
+            "Legacy payloads (no hook_event_name) should default to AiAgent"
+        );
+        assert_eq!(run.agent_id.model, "unknown");
+        assert!(run.edited_filepaths.is_none());
+    }
+
+    #[test]
+    fn test_codex_stdin_model_overrides_rollout() {
+        // When stdin provides a model, it should be used even if rollout parsing
+        // would return a different model (or fail).
+        let input = serde_json::json!({
+            "session_id": "sess-model",
+            "cwd": "/tmp/test-repo",
+            "hook_event_name": "PostToolUse",
+            "model": "o4-mini",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": "apply_patch"},
+            "tool_use_id": "call_model"
+        });
+
+        let result = CodexPreset.run(AgentCheckpointFlags {
+            hook_input: Some(input.to_string()),
+        });
+
+        let run = result.unwrap();
+        assert_eq!(run.agent_id.model, "o4-mini");
+    }
+
+    #[test]
+    fn test_extract_filepaths_from_tool_input_no_files() {
+        let hook_data = serde_json::json!({
+            "tool_input": {"command": "apply_patch"}
+        });
+        assert!(CodexPreset::extract_filepaths_from_tool_input(&hook_data).is_none());
     }
 }
