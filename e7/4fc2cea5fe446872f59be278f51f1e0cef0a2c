@@ -1,0 +1,24 @@
+src/commands/checkpoint_agent/agent_presets.rs
+  5344784f6c92e412 1041-1075,1100,1112,1119,1122-1124,1135-1142,1173-1208,3735-3912
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.6",
+  "base_commit_sha": "e74fc2cea5fe446872f59be278f51f1e0cef0a2c",
+  "prompts": {
+    "5344784f6c92e412": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cec39528-d6d0-41b5-8a3e-ed30c1ddc00c",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "oatiz",
+      "messages": [],
+      "total_additions": 398,
+      "total_deletions": 136,
+      "accepted_lines": 265,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/8cd37099493ab6a45464069fc90b4103076ab5a291e1f0fb3cf102ad182d142a"
+    }
+  }
+}
