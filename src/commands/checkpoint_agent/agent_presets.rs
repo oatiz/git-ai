@@ -1039,6 +1039,41 @@ impl AgentCheckpointPreset for CodexPreset {
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
+        // Prefer model from stdin (available in PreToolUse/PostToolUse payloads),
+        // fall back to rollout transcript parsing below.
+        let stdin_model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let hook_event_name = hook_data
+            .get("hook_event_name")
+            .and_then(|v| v.as_str());
+
+        // For PreToolUse, return a human checkpoint immediately — no transcript needed.
+        if hook_event_name == Some("PreToolUse") {
+            let will_edit_filepaths =
+                CodexPreset::extract_filepaths_from_tool_input(&hook_data);
+
+            let agent_id = AgentId {
+                tool: "codex".to_string(),
+                id: session_id,
+                model: stdin_model.unwrap_or_else(|| "unknown".to_string()),
+            };
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: Some(cwd.to_string()),
+                edited_filepaths: None,
+                will_edit_filepaths,
+                dirty_files: None,
+            });
+        }
+
+        // PostToolUse or legacy (no hook_event_name): parse transcript and build AI checkpoint.
         let transcript_path = hook_data
             .get("transcript_path")
             .and_then(|v| v.as_str())
@@ -1063,7 +1098,7 @@ impl AgentCheckpointPreset for CodexPreset {
                 },
             );
 
-        let (transcript, model) = if let Some(path) = transcript_path.as_deref() {
+        let (transcript, rollout_model) = if let Some(path) = transcript_path.as_deref() {
             match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(path) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
@@ -1075,24 +1110,37 @@ impl AgentCheckpointPreset for CodexPreset {
                             "operation": "transcript_and_model_from_codex_rollout_jsonl"
                         })),
                     );
-                    (AiTranscript::new(), Some("unknown".to_string()))
+                    (AiTranscript::new(), None)
                 }
             }
         } else {
             eprintln!(
                 "[Warning] No Codex rollout path found for session {session_id}; continuing with empty transcript"
             );
-            (AiTranscript::new(), Some("unknown".to_string()))
+            (AiTranscript::new(), None)
         };
+
+        let model = stdin_model
+            .or(rollout_model)
+            .unwrap_or_else(|| "unknown".to_string());
 
         let agent_id = AgentId {
             tool: "codex".to_string(),
             id: session_id,
-            model: model.unwrap_or_else(|| "unknown".to_string()),
+            model,
         };
 
         let agent_metadata =
             transcript_path.map(|path| HashMap::from([("transcript_path".to_string(), path)]));
+
+        // For PostToolUse, extract edited file paths: prefer tool_input.files,
+        // fall back to parsing tool_response output.
+        let edited_filepaths = if hook_event_name == Some("PostToolUse") {
+            CodexPreset::extract_filepaths_from_tool_input(&hook_data)
+                .or_else(|| CodexPreset::extract_filepaths_from_tool_response(&hook_data))
+        } else {
+            None
+        };
 
         Ok(AgentRunResult {
             agent_id,
@@ -1100,7 +1148,7 @@ impl AgentCheckpointPreset for CodexPreset {
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(cwd.to_string()),
-            edited_filepaths: None,
+            edited_filepaths,
             will_edit_filepaths: None,
             dirty_files: None,
         })
@@ -1121,6 +1169,42 @@ impl CodexPreset {
                     .and_then(|v| v.as_str())
             })
             .map(|s| s.to_string())
+    }
+
+    /// Extract file paths from tool_input.files array.
+    fn extract_filepaths_from_tool_input(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let files = hook_data.get("tool_input")?.get("files")?.as_array()?;
+        let paths: Vec<String> = files.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    /// Extract edited file paths from tool_response for PostToolUse events.
+    /// Codex apply_patch output format: "Success. Updated the following files:\nA path\nM path\n"
+    fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let tool_response = hook_data.get("tool_response")?;
+
+        // tool_response can be a JSON string or an object
+        let response_obj = if let Some(s) = tool_response.as_str() {
+            serde_json::from_str::<serde_json::Value>(s).ok()?
+        } else {
+            tool_response.clone()
+        };
+
+        let output = response_obj.get("output").and_then(|v| v.as_str())?;
+
+        let mut paths = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            // Format: "A poems/old-poem.txt" or "M src/main.rs" (status letter + space + path)
+            if trimmed.len() > 2
+                && trimmed.as_bytes()[1] == b' '
+                && matches!(trimmed.as_bytes()[0], b'A' | b'M' | b'D' | b'R' | b'U')
+            {
+                paths.push(trimmed[2..].to_string());
+            }
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
     }
 
     pub fn codex_home_dir() -> PathBuf {
