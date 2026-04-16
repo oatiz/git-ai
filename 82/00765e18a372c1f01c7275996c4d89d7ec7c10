@@ -1,0 +1,26 @@
+docs/solutions/logic-errors/codex-apply-patch-tool-classification.md
+  fabe2cb920ce042b 1-112
+AGENTS.md
+  fabe2cb920ce042b 152-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0-codex",
+  "base_commit_sha": "8200765e18a372c1f01c7275996c4d89d7ec7c10",
+  "prompts": {
+    "fabe2cb920ce042b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "221a4230-c199-4b93-9754-3a5be4d7455c",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "oatiz",
+      "messages": [],
+      "total_additions": 116,
+      "total_deletions": 0,
+      "accepted_lines": 116,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/af8fd495894fdd2b6b963cb1aa3b775191a43a0b36192f76e742aba90d478b21"
+    }
+  }
+}
