@@ -149,3 +149,7 @@ Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapsh
 - **SQLite WAL files**: Test DB paths are placed as siblings to the repo directory (not inside `.git/`) to prevent WAL/SHM files from interfering with git operations.
 
 - **`smol` async runtime**: The project uses `smol` (not tokio) for async operations with `futures` combinators. The async surface area is small -- mostly HTTP operations and background flushes.
+
+## Documented Solutions
+
+`docs/solutions/` — documented solutions to past problems, organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when debugging or implementing in documented areas.
