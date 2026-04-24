@@ -1,0 +1,32 @@
+tests/integration/bash_tool_conformance.rs
+  7c6f05e02dc28789 632-635
+src/commands/checkpoint_agent/agent_presets.rs
+  7c6f05e02dc28789 10,1530-1532,1551-1603,1628,1658-1660,1663,1698-1722,1804-1998
+src/commands/checkpoint_agent/bash_tool.rs
+  7c6f05e02dc28789 460,1924-1930
+src/commands/checkpoint.rs
+  7c6f05e02dc28789 1162-1204
+tests/integration/codex.rs
+  7c6f05e02dc28789 315-533,1057-1060
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.5",
+  "base_commit_sha": "57a4172a0057b6097d2396035adb2fdc731eb464",
+  "prompts": {
+    "7c6f05e02dc28789": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dbe56-1741-72a0-8398-67d8a40648b8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "oatiz",
+      "messages": [],
+      "total_additions": 574,
+      "total_deletions": 33,
+      "accepted_lines": 563,
+      "overriden_lines": 0,
+      "messages_url": "https://codeaiapi.xinfei-inc.cn/cas/56fefa9c94cf5cb81b688c8ed8df1aa55d28c9c30a7805c43675f6b70cd94750"
+    }
+  }
+}
